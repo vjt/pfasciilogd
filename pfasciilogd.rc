@@ -1,0 +1,33 @@
+#!/bin/sh
+
+# PROVIDE: pfasciilogd
+# REQUIRE: LOGIN
+# BEFORE:  securelevel
+# KEYWORD: shutdown
+
+# Add the following lines to /etc/rc.conf to enable `pfasciilogd':
+#
+# pfasciilog_enable="YES"
+#
+
+. /etc/rc.subr
+
+name="pfasciilog"
+rcvar=pfasciilog_enable
+
+command="/usr/sbin/daemon"
+pidfile="/var/run/pfasciilogd.pid"
+procname="/usr/local/bin/python3"
+executable="/usr/local/sbin/pfasciilogd"
+extra_commands="reload"
+sig_reload="HUP"
+
+# read configuration and set defaults
+load_rc_config "$name"
+: ${pfasciilog_enable="NO"}
+
+required_files="$executable"
+
+command_args="-S -T $name $executable"
+
+run_rc_command "$1"

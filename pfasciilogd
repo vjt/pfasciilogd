@@ -1,0 +1,123 @@
+#!/usr/local/bin/python3
+
+#
+# (C) 2023 Marcello Barnaba <vjt@openssl.it>
+#
+# MIT licensed (see LICENSE for details)
+#
+
+# Spans `tcpdump` on `pflog0` and writes its output to /var/log/pf.log
+# Useful as a data source for fail2ban
+
+import asyncio
+from asyncio import subprocess
+from datetime import datetime
+import os
+import signal
+
+COMMAND = ['tcpdump', '-Z', 'nobody', '-t', '-leni', 'pflog0']
+LOGFILE = '/var/log/pf.log'
+PIDFILE = '/var/run/pfasciilogd.pid'
+
+class Logger():
+  """
+  Just a logger abstraction to a file. The logging framework
+  was too heavyweight to pull in.
+
+  Prefixes every line with an ISO8601 timestamp.
+  """
+  def __init__(self, filename):
+    self.filename = filename
+    self.open()
+
+  def open(self):
+    os.chmod(self.filename, 0o640)
+    self._stream = open(self.filename, 'a')
+
+  def close(self):
+    self._stream.close()
+
+  def reopen(self):
+    self.close()
+    self.open()
+    self.write('log reopened')
+
+  def write(self, message):
+    self._stream.write(' '.join([self.ts(), message.strip() + '\n']))
+    self._stream.flush()
+
+  @staticmethod
+  def ts():
+    return datetime.now().astimezone().isoformat()
+
+async def tcpdump(logger):
+  """
+  Spawns tcpdump via `asyncio` and returns three coroutines:
+  * One that waits for tcpdump to stop
+  * One that reads from stdout and writes to the log
+  * One that reads from stderr and writes to the log
+  """
+  process = await asyncio.create_subprocess_exec(
+    *COMMAND,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+  )
+
+  async def log_stdout():
+    async for line in process.stdout:
+      logger.write(line.decode())
+
+  async def log_stderr():
+    async for line in process.stderr:
+      logger.write(line.decode())
+
+  return process.wait(), log_stdout(), log_stderr()
+
+async def loop_forever(logger):
+  """
+  Main loop - run the three coroutines in parallel, so to
+  effectively stream tcpdump's output to the logfile.
+  """
+  while True:
+    logger.write(f"starting {' '.join(COMMAND)}")
+    status, _, _ = await asyncio.gather(*await tcpdump(logger))
+    logger.write(f"tcpdump exited with status {status}")
+
+async def main():
+  """
+  Open the log, write a pidfile, set up signal handlers for
+  graceful shutdown and log rotation, and start main loop.
+  """
+  logger = Logger(LOGFILE)
+
+  with open(PIDFILE, 'w+') as pidfile:
+    pidfile.write(str(os.getpid()) + '\n')
+  logger.write(f"wrote pidfile to {PIDFILE}")
+
+  loop = asyncio.get_running_loop()
+  for sig in [signal.SIGHUP, signal.SIGUSR1]:
+    loop.add_signal_handler(sig, logger.reopen)
+
+  for sig in [signal.SIGINT, signal.SIGTERM]:
+    loop.add_signal_handler(sig, shutdown, sig, logger)
+
+  try:
+    await loop_forever(logger)
+  except asyncio.exceptions.CancelledError:
+    pass
+
+def shutdown(sig, logger):
+  """
+  Cancel all tasks gracefully and log something
+  """
+  logger.write(f"caught signal {sig.name}")
+
+  for task in asyncio.tasks.all_tasks():
+    if task is not asyncio.tasks.current_task():
+      task.cancel()
+
+  logger.write("exiting")
+  logger.close()
+
+if __name__ == "__main__":
+  asyncio.run(main())
